@@ -11,6 +11,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -22,6 +23,7 @@ JOBS = int(os.environ.get("MUSUBI_CLIPS_JOBS", 3))
 WORK = Path(os.environ.get("MUSUBI_CLIPS_DIR", Path.home() / "MusubiClips"))
 FACE_MODEL = Path.home() / ".cache" / "musubi-clips" / "face_detection_yunet_2023mar.onnx"
 FACE_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+YTDLP = ["yt-dlp"] + (["--cookies-from-browser", os.environ["MUSUBI_CLIPS_COOKIES"]] if os.environ.get("MUSUBI_CLIPS_COOKIES") else [])
 OUT_W, OUT_H = 1080, 1920
 HOOK_SECONDS = 3.0
 MIN_CLIP, MAX_CLIP = 12.0, 90.0
@@ -29,7 +31,11 @@ MIN_FACE = 0.05
 
 
 def run(cmd, cwd=None):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd)
+    try:
+        return subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd)
+    except subprocess.CalledProcessError as error:
+        print(f"{cmd[0]} failed: {(error.stderr or '')[-800:]}", file=sys.stderr)
+        raise
 
 
 def log(msg):
@@ -45,12 +51,12 @@ def fetch(source):
         workdir = WORK / re.sub(r"[^A-Za-z0-9_-]", "_", path.stem)
         workdir.mkdir(parents=True, exist_ok=True)
         return workdir, path, {"title": path.stem, "url": "", "path": str(path)}
-    video_id = run(["yt-dlp", "--print", "id", "--skip-download", source]).stdout.strip().splitlines()[-1]
+    video_id = run([*YTDLP, "--print", "id", "--skip-download", source]).stdout.strip().splitlines()[-1]
     workdir = WORK / video_id
     workdir.mkdir(parents=True, exist_ok=True)
     if not source_audio(workdir):
         log(f"downloading the audio of {source}")
-        run(["yt-dlp", "-f", "ba[ext=m4a]/ba", "--write-info-json", "--no-playlist",
+        run([*YTDLP, "-f", "ba[ext=m4a]/ba", "--write-info-json", "--no-playlist",
              "-o", str(workdir / "source-audio.%(ext)s"), source])
     info = json.loads((workdir / "source-audio.info.json").read_text(encoding="utf-8"))
     return workdir, source_audio(workdir), {"title": info.get("title", video_id), "url": info.get("webpage_url", source)}
@@ -64,6 +70,15 @@ def source_audio(workdir):
     return found[0] if found else None
 
 
+
+def stream_url(url):
+    for command in (["yt-dlp"], YTDLP):
+        try:
+            return run([*command, "-g", "-f", VIDEO_FORMAT, "--no-playlist", url]).stdout.strip().splitlines()[0]
+        except (subprocess.CalledProcessError, IndexError):
+            pass
+    return "unavailable:"
+
 def video_section(workdir, meta, clip, stream):
     full = workdir / "source.mp4"
     if full.exists():
@@ -76,10 +91,29 @@ def video_section(workdir, meta, clip, stream):
     out = workdir / "sections" / f"{start:.2f}-{end:.2f}.mp4"
     if not out.exists():
         out.parent.mkdir(exist_ok=True)
-        run(["ffmpeg", "-y", "-ss", f"{start}", "-t", f"{end - start}", "-i", stream,
-             "-ss", f"{start}", "-t", f"{end - start}", "-i", str(source_audio(workdir)),
-             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
-             "-c:a", "aac", "-b:a", "192k", str(out)])
+        audio = ["-ss", f"{start}", "-t", f"{end - start}", "-i", str(source_audio(workdir)),
+                 "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                 "-c:a", "aac", "-b:a", "192k", str(out)]
+        try:
+            run(["ffmpeg", "-y", "-ss", f"{start}", "-t", f"{end - start}", "-i", stream, *audio])
+        except subprocess.CalledProcessError:
+            out.unlink(missing_ok=True)
+            if not meta.get("url"):
+                raise
+            piece = out.with_suffix(".video.mp4")
+            for attempt in range(3):
+                try:
+                    piece.unlink(missing_ok=True)
+                    run([*YTDLP, "-f", VIDEO_FORMAT, "--no-playlist", "--download-sections", f"*{start}-{end}",
+                         "--force-keyframes-at-cuts", "-o", str(piece), meta["url"]])
+                    run(["ffmpeg", "-y", "-t", f"{end - start}", "-i", str(piece), *audio])
+                    break
+                except subprocess.CalledProcessError:
+                    out.unlink(missing_ok=True)
+                    if attempt == 2:
+                        raise
+                    time.sleep(20)
+            piece.unlink(missing_ok=True)
     return out, start
 
 
@@ -139,7 +173,7 @@ def fetch_translated(workdir):
 
 def youtube_transcript(workdir, url):
     if not caption_file(workdir):
-        subprocess.run(["yt-dlp", "--skip-download", "--write-auto-subs", "--sub-langs", "en.*-orig,en", "--sub-format", "json3",
+        subprocess.run([*YTDLP, "--skip-download", "--write-auto-subs", "--sub-langs", "en.*-orig,en", "--sub-format", "json3",
                         "-o", str(workdir / "captions.%(ext)s"), url], capture_output=True)
     if not caption_file(workdir):
         fetch_translated(workdir)
@@ -356,7 +390,7 @@ def cut_graph(video, clip, detector, subtitles=None):
     pieces = pieces_for(clip)
     focus = clip.get("focus_x")
     base = clip["start"]
-    parts, steps, offset = [], [], 0.0
+    parts, steps, offset, seen = [], [], 0.0, []
     capture = cv2.VideoCapture(str(video))
     crop_w = min(src_w, round(src_h * 9 / 16 / 2) * 2)
     for i, (a, b) in enumerate(pieces):
@@ -364,12 +398,17 @@ def cut_graph(video, clip, detector, subtitles=None):
                      f"[0:a]atrim=start={a - base:.3f}:end={b - base:.3f},asetpts=PTS-STARTPTS[a{i}]")
         bounds = [a] + [t for t in shot_cuts(video, a, b) if a + 0.3 < t < b - 0.3] + [b]
         for s, e in zip(bounds, bounds[1:]):
-            steps.append((offset + s - a, crop_x(face_center(capture, detector, s, e, focus), src_w, crop_w)))
+            center = face_center(capture, detector, s, e, focus)
+            seen.append(center is not None)
+            steps.append((offset + s - a, crop_x(center, src_w, crop_w)))
         offset += b - a
     capture.release()
 
     joined = "".join(f"[v{i}][a{i}]" for i in range(len(pieces))) + f"concat=n={len(pieces)}:v=1:a=1[cv][ca]"
-    if src_w / src_h > 9 / 16 + 0.01:
+    if src_w / src_h > 9 / 16 + 0.01 and sum(seen) < len(seen) / 2:
+        frame = (f"split[bg][fg];[bg]scale=-2:{OUT_H},crop={OUT_W}:{OUT_H},boxblur=30:2[blur];"
+                 f"[fg]scale={OUT_W}:-2[fit];[blur][fit]overlay=0:(H-h)/2")
+    elif src_w / src_h > 9 / 16 + 0.01:
         frame = f"crop={crop_w}:{src_h}:x='{crop_expression(steps)}':y=0,scale={OUT_W}:{OUT_H}"
     else:
         frame = f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
@@ -528,7 +567,14 @@ def render_all(workdir, count, basic=False):
     stream = None
     if not (workdir / "source.mp4").exists() and meta.get("url"):
         log("finding the video stream")
-        stream = run(["yt-dlp", "-g", "-f", VIDEO_FORMAT, "--no-playlist", meta["url"]]).stdout.strip().splitlines()[0]
+        for attempt in range(3):
+            try:
+                stream = stream_url(meta["url"])
+                break
+            except subprocess.CalledProcessError:
+                if attempt == 2:
+                    raise
+                time.sleep(30)
     from concurrent.futures import ThreadPoolExecutor
 
     parallel = len(clips) > 1
