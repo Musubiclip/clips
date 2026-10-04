@@ -22,9 +22,9 @@ def test_crop_x_clamps_to_frame():
 
 
 def test_captions_break_on_size_gap_and_punctuation():
-    words = [word("a", 0, 0.2), word("b", 0.2, 0.4), word("c.", 0.4, 0.6), word("d", 0.6, 0.8),
-             word("e", 2.0, 2.2), word("f", 2.2, 2.4), word("g", 2.4, 2.6), word("h", 2.6, 2.8)]
-    assert [[w["word"] for w in c] for c in caption_chunks(words)] == [["a", "b", "c."], ["d"], ["e", "f", "g"], ["h"]]
+    words = [word("a", 0, 0.2), word("b,", 0.2, 0.4), word("c.", 0.4, 0.6), word("d", 0.6, 0.8),
+             *[word(str(i), 2.0 + i * 0.2, 2.2 + i * 0.2) for i in range(7)]]
+    assert [[w["word"] for w in c] for c in caption_chunks(words)] == [["a", "b,", "c."], ["d"], ["0", "1", "2", "3", "4", "5"], ["6"]]
 
 
 def test_tidy_snaps_drops_overlaps_and_ranks():

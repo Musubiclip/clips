@@ -369,11 +369,11 @@ def ass_time(t):
     return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
 
 
-def caption_chunks(words, size=3, gap=0.6):
+def caption_chunks(words, size=6, gap=0.6):
     chunks, current = [], []
     for word in words:
         if current and (len(current) == size or word["start"] - current[-1]["end"] > gap
-                        or current[-1]["word"][-1:] in ".?!,"):
+                        or current[-1]["word"][-1:] in ".?!"):
             chunks.append(current)
             current = []
         current.append(word)

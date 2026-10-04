@@ -364,11 +364,11 @@
           const next = DATA.groups[gi + 1];
           const nextStart = next ? DATA.words[next[0]].s : DATA.duration;
           const start = words[0].s;
-          const end = Math.max(start + 0.2, Math.min(words[words.length - 1].e + 0.45, nextStart - 0.04));
+          const end = Math.max(start + 0.2, Math.min(words[words.length - 1].e + 1.2, nextStart - 0.04));
           const group = document.createElement("div");
           group.className = "cg";
           group.id = "cg-" + gi;
-          const size = fitSize(words.map((w) => w.t.toUpperCase()).join(" "), 84, 880);
+          const size = fitSize(words.reduce((a, w) => (w.t.length > a.length ? w.t : a), "").toUpperCase(), 70, 860);
           words.forEach((w, i) => {
             const idx = pair[0] + i;
             const emph = isEmphasis(w.t);
@@ -388,7 +388,7 @@
             group.appendChild(box);
 
             const until = i + 1 < words.length ? words[i + 1].s : Math.min(w.e + 0.2, end);
-            tl.fromTo(box, { opacity: 0, scale: 0.55, y: 26 }, { opacity: 1, scale: 1, y: 0, duration: 0.2, ease: "back.out(2.6)" }, w.s);
+            tl.fromTo(t, { opacity: 0.6 }, { opacity: 1, duration: 0.06 }, w.s);
             if (emph) {
               tl.fromTo(t, { scale: 1, rotation: 0 }, { scale: 1.14, rotation: -3, duration: 0.14, ease: "power2.out" }, w.s + 0.05);
               tl.to(t, { scale: 1, rotation: 0, duration: 0.3, ease: "back.out(2)" }, w.s + 0.19);
@@ -406,7 +406,7 @@
           });
           caps.appendChild(group);
           tl.set(group, { visibility: "visible" }, start);
-          tl.fromTo(group, { opacity: 0 }, { opacity: 1, duration: 0.08 }, start);
+          tl.fromTo(group, { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.14, ease: "power2.out" }, start);
           tl.to(group, { opacity: 0, y: -14, duration: 0.12, ease: "power2.in" }, end - 0.12);
           tl.set(group, { visibility: "hidden", y: 0 }, end);
         });
