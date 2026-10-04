@@ -5,9 +5,14 @@ def word(text, start, end):
     return {"word": text, "start": start, "end": end}
 
 
-def test_crop_expression_switches_per_shot():
+def test_crop_expression_slides_within_a_shot():
     assert crop_expression([(0, 10)]) == "10"
-    assert crop_expression([(0, 10), (2.5, 40), (6, 70)]) == "if(lt(t,2.500),10,if(lt(t,6.000),40,70))"
+    assert crop_expression([(0, 10), (2.5, 40)]) == "if(lt(t,2.500),10+(40-10)*(t-0.000)/2.500,40)"
+
+
+def test_crop_expression_cuts_hard_between_shots():
+    # equal timestamps mark a shot boundary: jump straight from 10 to 40, no slide
+    assert crop_expression([(0, 10), (2.5, 10), (2.5, 40), (5, 40)]) == "if(lt(t,2.500),10,if(lt(t,5.000),40,40))"
 
 
 def test_crop_x_clamps_to_frame():

@@ -331,10 +331,30 @@ def crop_x(center, src_w, crop_w):
     return int(max(0, min(src_w - crop_w, center - crop_w / 2)))
 
 
-def crop_expression(steps):
-    expr = str(steps[-1][1])
-    for (_, x), (next_start, _) in reversed(list(zip(steps, steps[1:]))):
-        expr = f"if(lt(t,{next_start:.3f}),{x},{expr})"
+def track_shot(capture, detector, start, end, focus, src_w, crop_w, shift):
+    """Crop positions across one shot, sampled every ~2.5s so the crop follows a speaker who moves.
+    Returns (points, found) where found says whether any face was seen in the shot."""
+    n = max(1, round((end - start) / 2.5))
+    times = [start + (end - start) * k / n for k in range(n + 1)]
+    centers = [face_center(capture, detector, max(start, t - 0.15), min(end, t + 0.15), focus) for t in times]
+    known = [c for c in centers if c is not None]
+    if not known:
+        centers = [None] * len(centers)
+    else:
+        fallback = statistics.median(known)
+        centers = [fallback if c is None else c for c in centers]
+        centers = [statistics.median(centers[max(0, i - 1):i + 2]) for i in range(len(centers))]
+    return [(shift + t, crop_x(c, src_w, crop_w)) for t, c in zip(times, centers)], bool(known)
+
+
+def crop_expression(points):
+    """Piecewise linear crop x over time; equal timestamps are hard cuts between shots."""
+    expr = str(points[-1][1])
+    for (t0, x0), (t1, x1) in reversed(list(zip(points, points[1:]))):
+        if t1 - t0 < 0.01:
+            continue
+        segment = str(x0) if x0 == x1 else f"{x0}+({x1}-{x0})*(t-{t0:.3f})/{t1 - t0:.3f}"
+        expr = f"if(lt(t,{t1:.3f}),{segment},{expr})"
     return expr
 
 
@@ -419,9 +439,9 @@ def cut_graph(video, clip, detector, subtitles=None):
                      f"[0:a]atrim=start={a - base:.3f}:end={b - base:.3f},asetpts=PTS-STARTPTS[a{i}]")
         bounds = [a] + [t for t in shot_cuts(video, a, b) if a + 0.3 < t < b - 0.3] + [b]
         for s, e in zip(bounds, bounds[1:]):
-            center = face_center(capture, detector, s, e, focus)
-            seen.append(center is not None)
-            steps.append((offset + s - a, crop_x(center, src_w, crop_w)))
+            points, found = track_shot(capture, detector, s, e, focus, src_w, crop_w, offset - a)
+            seen.append(found)
+            steps += points
         offset += b - a
     capture.release()
 
