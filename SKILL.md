@@ -5,7 +5,7 @@ description: Cut short vertical spec clips (9:16 Reels and Shorts with a hook li
 
 # Musubi spec clips
 
-Turns one long video into a few ready to send vertical clips: 1080×1920, cropped to follow the speaker, and animated like a produced Reel. A hook card lands in the first 3 seconds. Captions pop in word by word, with a yellow pill sliding behind the spoken word. Key words and numbers get a pink pop and a camera punch. A speaker tag and a progress bar round it off. The animation is a HyperFrames template (`assets/reel/index.html`) rendered per clip. Musubi sends these privately to a creator or brand to show what their content could look like as Reels.
+Turns one long video into a few ready to send vertical clips: 1080×1920, cropped to follow the speaker, and animated like a produced Reel. A hook card lands in the first 3 seconds. Captions pop in word by word, with a yellow pill sliding behind the spoken word. Key words and numbers get a pink pop and a camera punch. A speaker tag, a progress bar and a Musubi watermark (mark and musubiclip.com in a dark pill, bottom right, `assets/brand/watermark.png`) round it off. The animation is a HyperFrames template (`assets/reel/index.html`) rendered per clip. Musubi sends these privately to a creator or brand to show what their content could look like as Reels.
 
 The script does the mechanical work (download, transcript, crop, captions, render). **You** pick the moments, by reading the transcript like an editor would. That judgement is the part that makes the clips worth sending, so give it real attention.
 

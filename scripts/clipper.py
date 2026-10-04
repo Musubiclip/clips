@@ -18,6 +18,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent.parent
 FONTS = SKILL_DIR / "assets" / "fonts"
 REEL_TEMPLATE = SKILL_DIR / "assets" / "reel" / "index.html"
+WATERMARK = SKILL_DIR / "assets" / "brand" / "watermark.png"
 HYPERFRAMES = "hyperframes@0.8.96"
 JOBS = int(os.environ.get("MUSUBI_CLIPS_JOBS", 3))
 WORK = Path(os.environ.get("MUSUBI_CLIPS_DIR", Path.home() / "MusubiClips"))
@@ -412,8 +413,10 @@ def cut_graph(video, clip, detector, subtitles=None):
         frame = f"crop={crop_w}:{src_h}:x='{crop_expression(steps)}':y=0,scale={OUT_W}:{OUT_H}"
     else:
         frame = f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
-    caption = f",subtitles={subtitles}:fontsdir=." if subtitles else ""
-    return ";".join(parts + [joined, f"[cv]{frame},setsar=1{caption}[vo]"])
+    if not subtitles:
+        return ";".join(parts + [joined, f"[cv]{frame},setsar=1[vo]"])
+    return ";".join(parts + [joined, f"[cv]{frame},setsar=1,subtitles={subtitles}:fontsdir=.[sv]",
+                             f"movie={WATERMARK.name}[wm]", "[sv][wm]overlay=W-w-48:H-h-64[vo]"])
 
 
 def cut(video, clip, graph, out, cwd):
@@ -460,6 +463,7 @@ def render_styled(workdir, video, clip, words, name, detector, clip_dir, paralle
     (project / "fonts").mkdir(parents=True)
     for font in FONTS.glob("*.ttf"):
         shutil.copy(font, project / "fonts" / font.name)
+    shutil.copy(WATERMARK, project / WATERMARK.name)
     cut(video, clip, cut_graph(video, clip, detector), project / "base.mp4", project)
     duration = round(duration_of(project / "base.mp4") - 0.05, 3)
     data = json.dumps(reel_data(clip, words, duration), ensure_ascii=False)
@@ -481,8 +485,10 @@ def render_basic(video, clip, words, name, detector, clip_dir):
     (clip_dir / f"{name}.ass").write_text(encoding="utf-8", data=build_ass(clip, words))
     for font in FONTS.glob("*.ttf"):
         shutil.copy(font, clip_dir / font.name)
+    shutil.copy(WATERMARK, clip_dir / WATERMARK.name)
     cut(video, clip, cut_graph(video, clip, detector, subtitles=f"{name}.ass"), f"{name}.mp4", clip_dir)
     (clip_dir / f"{name}.ass").unlink()
+    (clip_dir / WATERMARK.name).unlink()
     for font in clip_dir.glob("*.ttf"):
         font.unlink()
 
