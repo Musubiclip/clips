@@ -293,6 +293,15 @@
         return Math.round(base * 0.6);
       }
 
+      function hookTop(height) {
+        if (!DATA.face) return 250;
+        const [top, bottom] = DATA.face;
+        const above = top - 100 - height;
+        if (above >= 110) return Math.min(250, above);
+        if (bottom + 40 + height <= 1140) return bottom + 40;
+        return Math.min(Math.max(bottom, 1360) + 40, 1740 - height);
+      }
+
       function buildHook(tl) {
         const card = document.getElementById("hook-card");
         const words = String(DATA.hook || "").split(/\s+/).filter(Boolean);
@@ -324,6 +333,7 @@
           card.appendChild(mask);
           inner.push(w);
         });
+        document.getElementById("hook").style.top = hookTop(card.offsetHeight) + "px";
         tl.fromTo(card, { scale: 0.86, rotation: -4, opacity: 0 }, { scale: 1, rotation: -2, opacity: 1, duration: 0.32, ease: "back.out(2.2)" }, 0);
         tl.fromTo(inner, { yPercent: 115 }, { yPercent: 0, duration: 0.34, ease: "power3.out", stagger: 0.05 }, 0.08);
         card.querySelectorAll(".hk-mark").forEach((mark, i) => {

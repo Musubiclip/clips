@@ -305,6 +305,26 @@ def face_center(capture, detector, start, end, focus=None):
     return statistics.median(centers) if centers else None
 
 
+def face_span(video, detector):
+    import cv2
+
+    capture = cv2.VideoCapture(str(video))
+    spans = []
+    for t in (0.3, 1.0, 1.7, 2.4):
+        capture.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ok, frame = capture.read()
+        if not ok:
+            continue
+        scale = 640 / frame.shape[1]
+        small = cv2.resize(frame, (640, round(frame.shape[0] * scale)))
+        detector.setInputSize((small.shape[1], small.shape[0]))
+        _, faces = detector.detect(small)
+        for x, y, w, h in (f[:4] for f in (faces if faces is not None else []) if f[2] >= small.shape[1] * MIN_FACE):
+            spans.append((y / scale, (y + h) / scale))
+    capture.release()
+    return [round(min(a for a, _ in spans)), round(max(b for _, b in spans))] if spans else None
+
+
 def crop_x(center, src_w, crop_w):
     if center is None:
         center = src_w / 2
@@ -426,7 +446,7 @@ def cut(video, clip, graph, out, cwd):
          "-movflags", "+faststart", str(out)], cwd=cwd)
 
 
-def reel_data(clip, words, duration):
+def reel_data(clip, words, duration, face=None):
     timeline = clip_timeline(clip, words)
     groups, index = [], 0
     for chunk in caption_chunks(timeline):
@@ -437,6 +457,7 @@ def reel_data(clip, words, duration):
         "duration": duration,
         "cut": round(clip["cold_open"][1] - clip["cold_open"][0], 3) if clip["cold_open"] else None,
         "hook": clip["hook_text"],
+        "face": face,
         "emphasis": clip.get("emphasis") or [],
         "speaker": {"name": name, "role": (clip.get("speaker_role") or "").strip()} if name else None,
         "words": [{"t": w["word"], "s": round(max(0.0, w["start"]), 3), "e": round(w["end"], 3)} for w in timeline],
@@ -466,7 +487,7 @@ def render_styled(workdir, video, clip, words, name, detector, clip_dir, paralle
     shutil.copy(WATERMARK, project / WATERMARK.name)
     cut(video, clip, cut_graph(video, clip, detector), project / "base.mp4", project)
     duration = round(duration_of(project / "base.mp4") - 0.05, 3)
-    data = json.dumps(reel_data(clip, words, duration), ensure_ascii=False)
+    data = json.dumps(reel_data(clip, words, duration, face_span(project / "base.mp4", detector)), ensure_ascii=False)
     html = REEL_TEMPLATE.read_text(encoding="utf-8")
     html = html.replace("__DURATION__", f"{duration}").replace("<!--__DATA__-->", f"<script>window.__REEL_DATA__ = {data};</script>")
     (project / "index.html").write_text(encoding="utf-8", data=html)

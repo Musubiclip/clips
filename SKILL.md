@@ -5,7 +5,7 @@ description: Cut short vertical spec clips (9:16 Reels and Shorts with a hook li
 
 # Musubi spec clips
 
-Turns one long video into a few ready to send vertical clips: 1080×1920, cropped to follow the speaker, and animated like a produced Reel. A hook card lands in the first 3 seconds. Captions pop in word by word, with a yellow pill sliding behind the spoken word. Key words and numbers get a pink pop and a camera punch. A speaker tag, a progress bar and a Musubi watermark (mark and musubiclip.com in a dark pill, bottom right, `assets/brand/watermark.png`) round it off. The animation is a HyperFrames template (`assets/reel/index.html`) rendered per clip. Musubi sends these privately to a creator or brand to show what their content could look like as Reels.
+Turns one long video into a few ready to send vertical clips: 1080×1920, cropped to follow the speaker, and animated like a produced Reel. A hook card lands in the first 3 seconds, placed clear of the speaker's face: above the head, else between chin and captions, else below the captions. Captions pop in word by word, with a yellow pill sliding behind the spoken word. Key words and numbers get a pink pop and a camera punch. A speaker tag, a progress bar and a Musubi watermark (mark and musubiclip.com in a dark pill, bottom right, `assets/brand/watermark.png`) round it off. The animation is a HyperFrames template (`assets/reel/index.html`) rendered per clip. Musubi sends these privately to a creator or brand to show what their content could look like as Reels.
 
 The script does the mechanical work (download, transcript, crop, captions, render). **You** pick the moments, by reading the transcript like an editor would. That judgement is the part that makes the clips worth sending, so give it real attention.
 
@@ -91,7 +91,7 @@ ffmpeg -v error -y -ss 5 -i "<clip file>" -frames:v 1 -vf scale=360:-2 "<workdir
 
 Then look at `check.jpg`, and delete it afterwards.
 
-The speaker's face should sit near the middle, the captions in the lower third, and the hook card or speaker tag near the top. Wide shots with two people far apart follow the bigger face; mention that if you see it.
+The speaker's face should sit near the middle, the captions in the lower third, the hook card clear of the face, and the speaker tag near the top. Wide shots with two people far apart follow the bigger face; mention that if you see it.
 
 ### 5. Report
 
