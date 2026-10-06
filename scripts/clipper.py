@@ -32,6 +32,9 @@ OUT_W, OUT_H = 1080, 1920
 HOOK_SECONDS = 3.0
 MIN_CLIP, MAX_CLIP = 12.0, 90.0
 MIN_FACE = 0.05
+LEAD, TAIL = 0.25, 0.7
+SENTENCE_REACH = 1.2
+FADE_IN, FADE_OUT, JOIN_FADE = 0.15, 0.5, 0.08
 
 
 def run(cmd, cwd=None):
@@ -256,7 +259,21 @@ def card(clip, key):
 
 
 def snap(t, words, edge):
-    return min(words, key=lambda w: abs(w[edge] - t))[edge]
+    if edge == "end":
+        whole = [w for w in words if w["word"][-1:] in ".?!"]
+    else:
+        whole = [w for i, w in enumerate(words) if i == 0 or words[i - 1]["word"][-1:] in ".?!"]
+    near = [w for w in whole if abs(w[edge] - t) <= SENTENCE_REACH]
+    return min(near or words, key=lambda w: abs(w[edge] - t))[edge]
+
+
+def breathe(start, end, words, lead, tail):
+    """Pad a cut so it never clips a syllable, stopping short of the neighbouring words."""
+    before = [w for w in words if w["start"] < start - 0.01]
+    after = [w for w in words if w["start"] > end - 0.01]
+    floor = before[-1]["start"] + 0.4 if before else 0.0
+    ceiling = after[0]["start"] - 0.06 if after else end + tail
+    return round(min(start, max(start - lead, floor)), 3), round(max(end, min(end + tail, ceiling)), 3)
 
 
 def rank_score(clip):
@@ -275,7 +292,8 @@ def tidy_clips(raw, words, keep):
         if clip.get("cold_open_start") is not None and clip.get("cold_open_end") is not None:
             cs, ce = snap(clip["cold_open_start"], words, "start"), snap(clip["cold_open_end"], words, "end")
             if start + 1 < cs and ce <= end and 1.5 <= ce - cs <= 8:
-                cold = [cs, ce]
+                cold = list(breathe(cs, ce, words, 0.1, 0.3))
+        start, end = breathe(start, end, words, LEAD, TAIL)
         clips.append({**clip, "start": start, "end": end, "cold_open": cold, "score": rank_score(clip)})
     clips.sort(key=lambda c: -c["score"])
     return clips[:keep]
@@ -504,8 +522,11 @@ def cut_graph(video, clip, detector, subtitles=None):
     crop_h = round(src_h * STYLE["keep_height"] / 2) * 2
     crop_w = min(src_w, round(crop_h * 9 / 16 / 2) * 2)
     for i, (a, b) in enumerate(pieces):
+        fade_in = FADE_IN if i == 0 else JOIN_FADE
+        fade_out = FADE_OUT if i == len(pieces) - 1 else JOIN_FADE
         parts.append(f"[0:v]trim=start={a - base:.3f}:end={b - base:.3f},setpts=PTS-STARTPTS[v{i}];"
-                     f"[0:a]atrim=start={a - base:.3f}:end={b - base:.3f},asetpts=PTS-STARTPTS[a{i}]")
+                     f"[0:a]atrim=start={a - base:.3f}:end={b - base:.3f},asetpts=PTS-STARTPTS,"
+                     f"afade=t=in:st=0:d={fade_in},afade=t=out:st={max(0.0, b - a - fade_out):.3f}:d={fade_out}[a{i}]")
         bounds = [a] + [t for t in shot_cuts(video, a, b) if a + 0.3 < t < b - 0.3] + [b]
         for s, e in zip(bounds, bounds[1:]):
             points, found = track_shot(capture, detector, s, e, focus, src_w, crop_w, offset - a)

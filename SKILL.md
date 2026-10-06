@@ -54,6 +54,8 @@ What makes a clip worth sending:
 - **It stands alone.** Someone who never saw the video has to follow it. No "as I said", no unexplained "he" or "that". This matters most, because the recipient judges the clip cold.
 - **It hooks inside 3 seconds.** Start on the first word of a line that makes someone stop scrolling: a bold claim, a number, a question, a confession.
 - **It pays off.** End right after the punchline or the answer, never mid thought.
+- **It stays on the hook's topic to the last word.** The final line is the one that pays off the hook. Read the next two lines after your end: if they are a new question, an interviewer or host moving on, or another speaker reacting, end before them. A clip that drifts into the next topic feels unfinished however strong its hook.
+- **Every speaker finishes.** Start on the first word of a sentence and end on its last; never cut someone mid sentence, and never open on a word like "she" or "that" that needs the line before it. Skip a teaser cold open when the clip already ends on that same line.
 - **Length is 12 to 60 seconds.** 20 to 45 is the sweet spot for Reels.
 - **Clips never overlap.**
 - **Timestamps come from the transcript lines.** The script snaps them to the nearest word, so a line's start and end are safe choices.
@@ -111,7 +113,7 @@ uv run <skill dir>/scripts/clipper.py render <workdir> -n <clips wanted> [--desi
 
 `--watermark` adds or drops the musubiclip.com watermark. Leave it out to get each design's default: on for v1, off for v2. Ask the user only if they mention branding.
 
-It snaps your picks to word boundaries, drops any that overlap or fall outside 12 to 90 seconds, keeps the top `n` by score, and renders them. It fetches only each clip's minutes of video, then renders up to 3 clips at once in a headless browser: about 6 to 7 minutes for 3 clips on a recent Mac, slower on Windows. Run it in the background and tell the user it is rendering. The first run also downloads the renderer. Without Node it falls back to plain captions on its own; `--basic` forces them. It prints the clip files and a `review_page`. If it says moments.json needs fixing, fix the listed fields and run it again.
+It snaps your picks to sentence boundaries (the nearest full stop or question mark within about a second, else the nearest word), pads each end with a breath that stops short of the neighbouring words, fades the sound in and out and the picture to black at the end, drops any that overlap or fall outside 12 to 90 seconds, keeps the top `n` by score, and renders them. It fetches only each clip's minutes of video, then renders up to 3 clips at once in a headless browser: about 6 to 7 minutes for 3 clips on a recent Mac, slower on Windows. Run it in the background and tell the user it is rendering. The first run also downloads the renderer. Without Node it falls back to plain captions on its own; `--basic` forces them. It prints the clip files and a `review_page`. If it says moments.json needs fixing, fix the listed fields and run it again.
 
 Rendering again replaces the whole `clips` folder, so to add clips, add candidates to `moments.json` and render with a higher `-n`.
 
