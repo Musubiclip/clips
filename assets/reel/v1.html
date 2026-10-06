@@ -244,9 +244,10 @@
         </div>
       </div>
       <audio id="bg-audio" src="base.mp4" data-start="0" data-duration="__DURATION__" data-track-index="10" data-volume="1"></audio>
+      <!--__MUSIC__-->
       <div id="topshade"></div>
       <div id="shade"></div>
-      <img id="wm" src="watermark.png" alt="" />
+      <!--__WATERMARK__-->
       <div id="caps"></div>
       <div id="lt"><span id="lt-dot"></span><div><div id="lt-name"></div><div id="lt-role"></div></div></div>
       <div id="hook"><div id="hook-card"></div></div>
@@ -293,13 +294,22 @@
         return Math.round(base * 0.6);
       }
 
+      const CAP_BOTTOM = captionBottom();
+      const CAP_TOP = 1920 - CAP_BOTTOM - 200;
+
+      function captionBottom() {
+        if (!DATA.face) return 560;
+        const chin = 960 + (DATA.face[1] - 960) * 1.13;
+        return Math.round(Math.min(560, Math.max(190, 1920 - chin - 40 - 200)));
+      }
+
       function hookTop(height) {
         if (!DATA.face) return 250;
         const [top, bottom] = DATA.face;
         const above = top - 100 - height;
         if (above >= 110) return Math.min(250, above);
-        if (bottom + 40 + height <= 1140) return bottom + 40;
-        return Math.min(Math.max(bottom, 1360) + 40, 1740 - height);
+        if (bottom + 40 + height <= CAP_TOP - 20) return bottom + 40;
+        return Math.min(Math.max(bottom, 1920 - CAP_BOTTOM) + 40, 1740 - height);
       }
 
       function buildHook(tl) {
@@ -368,6 +378,7 @@
           const group = document.createElement("div");
           group.className = "cg";
           group.id = "cg-" + gi;
+          group.style.bottom = CAP_BOTTOM + "px";
           const size = fitSize(words.reduce((a, w) => (w.t.length > a.length ? w.t : a), "").toUpperCase(), 70, 860);
           words.forEach((w, i) => {
             const idx = pair[0] + i;

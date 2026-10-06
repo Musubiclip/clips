@@ -12,15 +12,18 @@ import statistics
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.request
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 FONTS = SKILL_DIR / "assets" / "fonts"
-REEL_TEMPLATE = SKILL_DIR / "assets" / "reel" / "index.html"
+REEL_TEMPLATES = {"v1": SKILL_DIR / "assets" / "reel" / "v1.html", "v2": SKILL_DIR / "assets" / "reel" / "v2.html"}
+STYLE = {"design": "v2", "keep_height": 1.0, "watermark": False}
 WATERMARK = SKILL_DIR / "assets" / "brand" / "watermark.png"
 HYPERFRAMES = "hyperframes@0.8.96"
 JOBS = int(os.environ.get("MUSUBI_CLIPS_JOBS", 3))
+MUSIC = {"file": None, "volume": 0.12}
 WORK = Path(os.environ.get("MUSUBI_CLIPS_DIR", Path.home() / "MusubiClips"))
 FACE_MODEL = Path.home() / ".cache" / "musubi-clips" / "face_detection_yunet_2023mar.onnx"
 FACE_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
@@ -123,6 +126,9 @@ def shifted(clip, words, offset):
         return clip, words
     moved = {**clip, "start": clip["start"] - offset, "end": clip["end"] - offset,
              "cold_open": [t - offset for t in clip["cold_open"]] if clip["cold_open"] else None}
+    for key in ("stat", "deal"):
+        if isinstance(clip.get(key), dict):
+            moved[key] = {**clip[key], **{k: clip[key][k] - offset for k in ("at", "sub_at") if isinstance(clip[key].get(k), (int, float))}}
     return moved, [{**w, "start": w["start"] - offset, "end": w["end"] - offset} for w in words]
 
 
@@ -156,7 +162,8 @@ def group_segments(words, gap=0.8, size=14):
 
 
 def caption_file(workdir):
-    found = sorted(workdir.glob("captions.en*-orig.json3")) or sorted(workdir.glob("captions.en.json3"))
+    found = (sorted(workdir.glob("captions.en*-orig.json3")) or sorted(workdir.glob("captions.*-orig.json3"))
+             or sorted(workdir.glob("captions.en.json3")))
     return found[0] if found else None
 
 
@@ -174,13 +181,14 @@ def fetch_translated(workdir):
 
 def youtube_transcript(workdir, url):
     if not caption_file(workdir):
-        subprocess.run([*YTDLP, "--skip-download", "--write-auto-subs", "--sub-langs", "en.*-orig,en", "--sub-format", "json3",
+        subprocess.run([*YTDLP, "--skip-download", "--write-auto-subs", "--sub-langs", ".*-orig", "--sub-format", "json3",
                         "-o", str(workdir / "captions.%(ext)s"), url], capture_output=True)
     if not caption_file(workdir):
         fetch_translated(workdir)
     found = caption_file(workdir)
     words = youtube_words(found) if found else []
-    return {"language": "en", "source": "youtube", "segments": group_segments(words)} if words else None
+    language = found.name.split(".")[1].split("-")[0] if found else "en"
+    return {"language": language, "source": "youtube", "segments": group_segments(words)} if words else None
 
 
 def transcribe(workdir, video, meta):
@@ -189,13 +197,62 @@ def transcribe(workdir, video, meta):
         return json.loads(cached.read_text(encoding="utf-8"))
     transcript = youtube_transcript(workdir, meta["url"]) if meta["url"] else None
     if not transcript:
-        sys.exit("YouTube has no English auto captions for this video, so it cannot be clipped.")
+        sys.exit("YouTube has no auto captions for this video, so it cannot be clipped.")
     cached.write_text(encoding="utf-8", data=json.dumps(transcript, ensure_ascii=False))
     return transcript
 
 
-def all_words(transcript):
-    return [w for s in transcript["segments"] for w in s["words"] if w["word"]]
+def all_words(transcript, workdir=None):
+    words = [w for s in transcript["segments"] for w in s["words"] if w["word"]]
+    roman = workdir / "roman.json" if workdir else None
+    if not roman or not roman.exists():
+        return words
+    table = {nfc(k): v for k, v in json.loads(roman.read_text(encoding="utf-8")).items()}
+    out = []
+    for w in words:
+        text, core = split_word(w["word"])
+        out.append({**w, "word": table.get(core, core) + text[len(core):]})
+    return out
+
+
+def nfc(text):
+    return unicodedata.normalize("NFC", text)
+
+
+def split_word(word):
+    text = nfc(word).replace("\u0964", ".").replace("\u0965", ".")
+    return text, text.rstrip(".?!,")
+
+
+def unromanised(workdir):
+    transcript = json.loads((workdir / "transcript.json").read_text(encoding="utf-8"))
+    raw = [w for s in transcript["segments"] for w in s["words"] if w["word"]]
+    roman = workdir / "roman.json"
+    table = {nfc(k) for k in json.loads(roman.read_text(encoding="utf-8"))} if roman.exists() else set()
+    spans = [(m["start"], m["end"]) for m in load_moments(workdir)]
+    missing = []
+    for w in raw:
+        core = split_word(w["word"])[1]
+        if any(a - 0.5 <= w["start"] <= b + 0.5 for a, b in spans) and not core.isascii() and core not in table and core not in missing:
+            missing.append(core)
+    return missing
+
+
+def clip_time(clip, t):
+    offset = 0.0
+    for a, b in pieces_for(clip):
+        if a - 0.05 <= t <= b + 0.05:
+            return round(offset + t - a, 3)
+        offset += b - a
+    return None
+
+
+def card(clip, key):
+    value = clip.get(key)
+    if not isinstance(value, dict) or "at" not in value:
+        return None
+    at = clip_time(clip, value["at"])
+    return {**value, "at": at} if at is not None else None
 
 
 def snap(t, words, edge):
@@ -246,6 +303,17 @@ def moment_problems(raw):
         for field in ("speaker_name", "speaker_role"):
             if clip.get(field) is not None and not isinstance(clip[field], str):
                 problems.append(f"moment {i}: {field} must be text")
+        parts = clip.get("hook_parts")
+        if parts is not None and (not isinstance(parts, dict) or not all(isinstance(parts.get(k, ""), str) for k in ("kicker", "big", "punch"))):
+            problems.append(f"moment {i}: hook_parts must hold kicker, big and punch as text")
+        for key in ("stat", "deal"):
+            value = clip.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, dict) or not isinstance(value.get("at"), (int, float)) or not isinstance(value.get("value"), str):
+                problems.append(f"moment {i}: {key} needs at (seconds in the source) and value (text)")
+            elif not clip.get("start", 0) <= value["at"] <= clip.get("end", 0):
+                problems.append(f"moment {i}: {key} at must fall between start and end")
     return problems
 
 
@@ -433,7 +501,8 @@ def cut_graph(video, clip, detector, subtitles=None):
     base = clip["start"]
     parts, steps, offset, seen = [], [], 0.0, []
     capture = cv2.VideoCapture(str(video))
-    crop_w = min(src_w, round(src_h * 9 / 16 / 2) * 2)
+    crop_h = round(src_h * STYLE["keep_height"] / 2) * 2
+    crop_w = min(src_w, round(crop_h * 9 / 16 / 2) * 2)
     for i, (a, b) in enumerate(pieces):
         parts.append(f"[0:v]trim=start={a - base:.3f}:end={b - base:.3f},setpts=PTS-STARTPTS[v{i}];"
                      f"[0:a]atrim=start={a - base:.3f}:end={b - base:.3f},asetpts=PTS-STARTPTS[a{i}]")
@@ -450,11 +519,13 @@ def cut_graph(video, clip, detector, subtitles=None):
         frame = (f"split[bg][fg];[bg]scale=-2:{OUT_H},crop={OUT_W}:{OUT_H},boxblur=30:2[blur];"
                  f"[fg]scale={OUT_W}:-2[fit];[blur][fit]overlay=0:(H-h)/2")
     elif src_w / src_h > 9 / 16 + 0.01:
-        frame = f"crop={crop_w}:{src_h}:x='{crop_expression(steps)}':y=0,scale={OUT_W}:{OUT_H}"
+        frame = f"crop={crop_w}:{crop_h}:x='{crop_expression(steps)}':y=0,scale={OUT_W}:{OUT_H}"
     else:
         frame = f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
     if not subtitles:
         return ";".join(parts + [joined, f"[cv]{frame},setsar=1[vo]"])
+    if not STYLE["watermark"]:
+        return ";".join(parts + [joined, f"[cv]{frame},setsar=1,subtitles={subtitles}:fontsdir=.[vo]"])
     return ";".join(parts + [joined, f"[cv]{frame},setsar=1,subtitles={subtitles}:fontsdir=.[sv]",
                              f"movie={WATERMARK.name}[wm]", "[sv][wm]overlay=W-w-48:H-h-64[vo]"])
 
@@ -477,6 +548,9 @@ def reel_data(clip, words, duration, face=None):
         "duration": duration,
         "cut": round(clip["cold_open"][1] - clip["cold_open"][0], 3) if clip["cold_open"] else None,
         "hook": clip["hook_text"],
+        "hook_parts": clip.get("hook_parts"),
+        "stat": card(clip, "stat"),
+        "deal": card(clip, "deal"),
         "face": face,
         "emphasis": clip.get("emphasis") or [],
         "speaker": {"name": name, "role": (clip.get("speaker_role") or "").strip()} if name else None,
@@ -505,11 +579,17 @@ def render_styled(workdir, video, clip, words, name, detector, clip_dir, paralle
     for font in FONTS.glob("*.ttf"):
         shutil.copy(font, project / "fonts" / font.name)
     shutil.copy(WATERMARK, project / WATERMARK.name)
+    music = ""
+    if MUSIC["file"]:
+        shutil.copy(MUSIC["file"], project / ("music" + Path(MUSIC["file"]).suffix))
+        music = (f'<audio id="music" src="music{Path(MUSIC["file"]).suffix}" data-start="0" data-duration="__DURATION__" '
+                 f'data-track-index="11" data-volume="{MUSIC["volume"]}"></audio>')
     cut(video, clip, cut_graph(video, clip, detector), project / "base.mp4", project)
     duration = round(duration_of(project / "base.mp4") - 0.05, 3)
     data = json.dumps(reel_data(clip, words, duration, face_span(project / "base.mp4", detector)), ensure_ascii=False)
-    html = REEL_TEMPLATE.read_text(encoding="utf-8")
-    html = html.replace("__DURATION__", f"{duration}").replace("<!--__DATA__-->", f"<script>window.__REEL_DATA__ = {data};</script>")
+    html = REEL_TEMPLATES[STYLE["design"]].read_text(encoding="utf-8")
+    html = html.replace("<!--__MUSIC__-->", music).replace("__DURATION__", f"{duration}").replace("<!--__DATA__-->", f"<script>window.__REEL_DATA__ = {data};</script>")
+    html = html.replace("<!--__WATERMARK__-->", '<img id="wm" src="watermark.png" alt="" />' if STYLE["watermark"] else "")
     (project / "index.html").write_text(encoding="utf-8", data=html)
     command = [npx(), "--yes", HYPERFRAMES, "render", str(project), "-o", str(clip_dir / f"{name}.mp4"),
                "--crf", "23", "--fps", "30", "--quiet"]
@@ -598,7 +678,7 @@ def prepare(source):
 def render_all(workdir, count, basic=False):
     meta = json.loads((workdir / "meta.json").read_text(encoding="utf-8"))
     transcript = json.loads((workdir / "transcript.json").read_text(encoding="utf-8"))
-    words = all_words(transcript)
+    words = all_words(transcript, workdir)
     clips = tidy_clips(load_moments(workdir), words, count)
     if not clips:
         sys.exit(f"No usable moments: each needs {MIN_CLIP:.0f} to {MAX_CLIP:.0f} seconds and must not overlap another.")
@@ -676,13 +756,32 @@ def main():
     step.add_argument("workdir", help="the workdir prepare printed, or the video id")
     step.add_argument("-n", "--count", type=int, default=3, help="clips to render")
     step.add_argument("--basic", action="store_true", help="plain burned in captions instead of the animated template")
+    step.add_argument("--music", help="an audio file mixed quietly under the speech (animated clips only)")
+    step.add_argument("--music-volume", type=float, default=0.12, help="music level, 0 to 1 (default 0.12)")
+    step.add_argument("--design", choices=sorted(REEL_TEMPLATES), default="v2", help="v2 Spotlight (default) or v1 the original white card look")
+    step.add_argument("--watermark", choices=("on", "off"),
+                      help="the musubiclip.com watermark; on by default for v1, off for v2")
+    step.add_argument("--keep-height", type=float, default=1.0,
+                      help="share of the source height to keep from the top, e.g. 0.86 to crop off burned in subtitles")
+    step = commands.add_parser("words", help="list transcript words inside moments.json that roman.json does not spell yet")
+    step.add_argument("workdir", help="the workdir prepare printed, or the video id")
     commands.add_parser("doctor", help="check the tools and key are in place")
     args = parser.parse_args()
 
     if args.command == "prepare":
         prepare(args.source)
     elif args.command == "render":
+        if args.music:
+            if not Path(args.music).is_file():
+                sys.exit(f"music file not found: {args.music}")
+            MUSIC.update(file=str(Path(args.music).resolve()), volume=args.music_volume)
+        if not 0.5 <= args.keep_height <= 1:
+            sys.exit("--keep-height must be between 0.5 and 1")
+        watermark = args.watermark == "on" if args.watermark else args.design == "v1"
+        STYLE.update(design=args.design, keep_height=args.keep_height, watermark=watermark)
         render_all(workdir_for(args.workdir), args.count, args.basic)
+    elif args.command == "words":
+        print(json.dumps(unromanised(workdir_for(args.workdir)), ensure_ascii=False))
     else:
         doctor()
 
