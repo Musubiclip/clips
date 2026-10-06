@@ -94,3 +94,28 @@ def test_shifted_moves_clip_words_and_pieces_together():
         return [(w["word"], round(w["start"], 6), round(w["end"], 6)) for w in timeline]
 
     assert rounded(clip_timeline(moved, moved_words)) == rounded(clip_timeline(clip, words))
+
+
+def test_cards_move_with_the_clip_and_land_in_clip_time():
+    from clipper import card, shifted
+    clip = {"start": 100.0, "end": 130.0, "cold_open": [120.0, 124.0],
+            "stat": {"at": 105.0, "value": "90%", "sub_at": 106.0}, "deal": {"at": 140.0, "value": "₹5 Cr"}}
+    moved, _ = shifted(clip, [], 99.0)
+    assert (moved["stat"]["at"], moved["stat"]["sub_at"]) == (6.0, 7.0)
+    assert card(moved, "stat")["at"] == 9.0
+    assert card(moved, "deal") is None
+
+
+def test_roman_table_spells_words_and_keeps_punctuation(tmp_path):
+    import json
+    from clipper import all_words
+    (tmp_path / "roman.json").write_text(json.dumps({"पानी": "paani", "थोड़ा": "thoda"}, ensure_ascii=False))
+    transcript = {"segments": [{"words": [word("पानी।", 0, 1), word("थोड़ा", 1, 2), word("Cleevo", 2, 3)]}]}
+    assert [w["word"] for w in all_words(transcript, tmp_path)] == ["paani.", "thoda", "Cleevo"]
+
+
+def test_moment_problems_checks_cards():
+    from clipper import moment_problems
+    good = {"start": 1, "end": 30, "title": "t", "hook_text": "h", "reason": "r", "hook": 3, "standalone": 3, "payoff": 3, "emotion": 3}
+    assert moment_problems([{**good, "stat": {"at": 5, "value": "90%"}, "hook_parts": {"big": "90%"}}]) == []
+    assert moment_problems([{**good, "deal": {"at": 50, "value": "₹5 Cr"}}]) == ["moment 1: deal at must fall between start and end"]
