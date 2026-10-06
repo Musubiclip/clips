@@ -81,6 +81,7 @@
       #deal-value { font: 800 140px/0.9 var(--display); letter-spacing: -0.03em; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
       #deal-sub { font: 800 46px/1.1 var(--display); color: var(--hot); }
       #deal-strip { background: var(--ink); color: var(--paper); font: 800 32px/1 var(--text); letter-spacing: 0.14em; text-transform: uppercase; padding: 22px 40px; clip-path: inset(0 100% 0 0); }
+      #fadeout { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
     </style>
   </head>
   <body>
@@ -135,6 +136,7 @@
 
       <!--__WATERMARK__-->
       <div id="flash"></div>
+      <div id="fadeout"></div>
       <div id="progress"><span id="progress-fill"></span></div>
     </div>
 
@@ -453,6 +455,7 @@
           tl.fromTo("#flash", { opacity: 0 }, { opacity: 0.85, duration: 0.05 }, DATA.cut - 0.03);
           tl.to("#flash", { opacity: 0, duration: 0.28, ease: "power2.out" }, DATA.cut + 0.02);
         }
+        tl.fromTo("#fadeout", { opacity: 0 }, { opacity: 1, duration: 0.45, ease: "power2.in" }, Math.max(0, DATA.duration - 0.45));
         tl.seek(0);
         window.__timelines["reel"] = tl;
       }

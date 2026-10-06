@@ -38,7 +38,7 @@ def test_tidy_snaps_drops_overlaps_and_ranks():
     ]
     clips = tidy_clips(raw, words, 5)
     assert [c["title"] for c in clips] == ["best", "a"]
-    assert (clips[1]["start"], clips[1]["end"], clips[1]["cold_open"]) == (10, 39.9, [30, 32.9])
+    assert (clips[1]["start"], clips[1]["end"], clips[1]["cold_open"]) == (9.75, 39.94, [29.9, 32.94])
     assert clips[0]["cold_open"] is None
 
 
@@ -119,3 +119,21 @@ def test_moment_problems_checks_cards():
     good = {"start": 1, "end": 30, "title": "t", "hook_text": "h", "reason": "r", "hook": 3, "standalone": 3, "payoff": 3, "emotion": 3}
     assert moment_problems([{**good, "stat": {"at": 5, "value": "90%"}, "hook_parts": {"big": "90%"}}]) == []
     assert moment_problems([{**good, "deal": {"at": 50, "value": "₹5 Cr"}}]) == ["moment 1: deal at must fall between start and end"]
+
+
+def test_breathe_pads_but_never_reaches_the_next_word():
+    from clipper import breathe
+    words = [word("a", 0.0, 0.5), word("b", 2.0, 2.4), word("c", 2.5, 3.0), word("d", 5.0, 5.4)]
+    assert breathe(2.0, 3.0, words, 0.25, 0.7) == (1.75, 3.7)
+    assert breathe(2.5, 3.0, words, 0.25, 0.7) == (2.4, 3.7)
+    assert breathe(2.0, 2.4, words, 0.25, 0.7) == (1.75, 2.44)
+
+
+def test_snap_prefers_whole_sentences_nearby():
+    from clipper import snap
+    words = [word("so", 0.0, 0.3), word("we", 0.3, 0.6), word("built", 0.6, 1.0), word("it.", 1.0, 1.4),
+             word("then", 1.5, 1.8), word("they", 1.8, 2.1), word("asked", 2.1, 2.5), word("why?", 2.5, 3.0), word("next", 6.0, 6.3)]
+    assert snap(1.9, words, "end") == 1.4
+    assert snap(0.4, words, "start") == 0.0
+    assert snap(1.9, words, "start") == 1.5
+    assert snap(6.2, words, "end") == 6.3

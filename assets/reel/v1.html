@@ -234,6 +234,7 @@
         paint-order: stroke fill;
         text-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
       }
+      #fadeout { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
     </style>
   </head>
   <body>
@@ -252,6 +253,7 @@
       <div id="lt"><span id="lt-dot"></span><div><div id="lt-name"></div><div id="lt-role"></div></div></div>
       <div id="hook"><div id="hook-card"></div></div>
       <div id="flash"></div>
+      <div id="fadeout"></div>
       <div id="progress"><span id="progress-fill"></span></div>
     </div>
     <script>
@@ -434,6 +436,7 @@
           tl.fromTo("#flash", { opacity: 0 }, { opacity: 0.85, duration: 0.05 }, DATA.cut - 0.03);
           tl.to("#flash", { opacity: 0, duration: 0.28, ease: "power2.out" }, DATA.cut + 0.02);
         }
+        tl.fromTo("#fadeout", { opacity: 0 }, { opacity: 1, duration: 0.45, ease: "power2.in" }, Math.max(0, DATA.duration - 0.45));
         tl.seek(0);
         window.__timelines["reel"] = tl;
       }
