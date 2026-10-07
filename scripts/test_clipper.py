@@ -1,4 +1,4 @@
-from clipper import caption_chunks, crop_expression, crop_x, tidy_clips
+from clipper import caption_chunks, crop_expression, crop_x, main_face, tidy_clips
 
 
 def word(text, start, end):
@@ -137,3 +137,9 @@ def test_snap_prefers_whole_sentences_nearby():
     assert snap(0.4, words, "start") == 0.0
     assert snap(1.9, words, "start") == 1.5
     assert snap(6.2, words, "end") == 6.3
+
+
+def test_main_face_ignores_a_hand_low_in_the_frame():
+    speaker, hand = (200, 80, 120, 150), (40, 400, 60, 60)
+    assert main_face([hand, speaker]) == speaker
+    assert main_face([]) is None

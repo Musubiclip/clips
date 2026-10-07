@@ -391,6 +391,11 @@ def face_center(capture, detector, start, end, focus=None):
     return statistics.median(centers) if centers else None
 
 
+def main_face(faces):
+    """The speaker is the biggest face; a hand or a second person must not stretch the span the hook avoids."""
+    return max(faces, key=lambda f: f[2] * f[3]) if len(faces) else None
+
+
 def face_span(video, detector):
     import cv2
 
@@ -405,7 +410,9 @@ def face_span(video, detector):
         small = cv2.resize(frame, (640, round(frame.shape[0] * scale)))
         detector.setInputSize((small.shape[1], small.shape[0]))
         _, faces = detector.detect(small)
-        for x, y, w, h in (f[:4] for f in (faces if faces is not None else []) if f[2] >= small.shape[1] * MIN_FACE):
+        face = main_face([f for f in (faces if faces is not None else []) if f[2] >= small.shape[1] * MIN_FACE])
+        if face is not None:
+            x, y, w, h = face[:4]
             spans.append((y / scale, (y + h) / scale))
     capture.release()
     return [round(min(a for a, _ in spans)), round(max(b for _, b in spans))] if spans else None
