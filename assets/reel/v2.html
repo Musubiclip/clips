@@ -82,10 +82,25 @@
       #deal-sub { font: 800 46px/1.1 var(--display); color: var(--hot); }
       #deal-strip { background: var(--ink); color: var(--paper); font: 800 32px/1 var(--text); letter-spacing: 0.14em; text-transform: uppercase; padding: 22px 40px; clip-path: inset(0 100% 0 0); }
       #fadeout { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
+
+      #end { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 56px; padding: 0 70px; background: var(--ink); visibility: hidden; }
+      #end-glow { position: absolute; left: 50%; top: 42%; width: 1100px; height: 1100px; margin: -550px 0 0 -550px; border-radius: 50%; background: radial-gradient(circle, rgba(255, 90, 31, 0.55), rgba(255, 90, 31, 0) 62%); }
+      #end-mark { position: relative; display: flex; justify-content: center; align-items: center; }
+      #end-ring { position: absolute; inset: -26px; border: 10px solid var(--hot); border-radius: 50%; opacity: 0; }
+      #end-tile { position: relative; overflow: hidden; background: var(--paper); box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6); }
+      #end.avatar #end-tile { width: 440px; height: 440px; border-radius: 50%; border: 10px solid var(--paper); }
+      #end.avatar #end-logo { width: 100%; height: 100%; object-fit: cover; }
+      #end.logo #end-tile { padding: 56px 64px; border-radius: 48px; }
+      #end.logo #end-ring { border-radius: 64px; }
+      #end.logo #end-logo { display: block; max-width: 680px; max-height: 300px; min-width: 240px; object-fit: contain; }
+      #end-text { position: relative; display: flex; flex-direction: column; align-items: center; gap: 26px; text-align: center; }
+      #end-name { display: flex; flex-wrap: wrap; justify-content: center; white-space: pre; overflow: hidden; padding: 8px 0; }
+      .end-g { display: inline-block; font: 800 104px/1 var(--display); color: var(--paper); letter-spacing: -0.02em; }
+      #end-line { font: 800 44px/1 var(--text); color: var(--ink); background: var(--sun); padding: 16px 30px 18px; border-radius: 16px; }
     </style>
   </head>
   <body>
-    <div id="root" data-composition-id="reel" data-start="0" data-duration="__DURATION__" data-width="1080" data-height="1920">
+    <div id="root" data-composition-id="reel" data-start="0" data-duration="__TOTAL__" data-width="1080" data-height="1920">
       <div id="cam">
         <div id="punch">
           <video id="bg" class="clip" src="base.mp4" data-start="0" data-duration="__DURATION__" data-track-index="0" muted playsinline></video>
@@ -137,6 +152,11 @@
       <!--__WATERMARK__-->
       <div id="flash"></div>
       <div id="fadeout"></div>
+      <div id="end">
+        <div id="end-glow"></div>
+        <div id="end-mark"><div id="end-ring"></div><div id="end-tile"><img id="end-logo" alt="" /></div></div>
+        <div id="end-text"><div id="end-name"></div><div id="end-line"></div></div>
+      </div>
       <div id="progress"><span id="progress-fill"></span></div>
     </div>
 
@@ -248,7 +268,7 @@
 
         const kicker = document.getElementById("hk-kicker");
         const kWords = String(parts.kicker || "").split(/\s+/).filter(Boolean);
-        const kSize = fitSize(kWords.join(" ").toUpperCase(), 64, 1880, "Bricolage Grotesque");
+        const kSize = Math.max(44, fitSize(kWords.join(" ").toUpperCase(), 64, 900, "Bricolage Grotesque"));
         kicker.innerHTML = kWords.map((w) => `<span class="hk-k" style="font-size:${kSize}px">${w}</span>`).join("");
         if (!kWords.length) kicker.style.display = "none";
 
@@ -444,6 +464,43 @@
         tl.set("#tag", { visibility: "hidden" }, out);
       }
 
+      function prepareEnd() {
+        const e = DATA.end;
+        if (!e) return Promise.resolve();
+        const logo = document.getElementById("end-logo");
+        logo.src = e.src;
+        return logo.decode().catch(() => {});
+      }
+
+      function buildEnd(tl) {
+        const e = DATA.end;
+        if (!e) return;
+        const at = D;
+        const end = document.getElementById("end");
+        end.classList.add(e.kind === "avatar" ? "avatar" : "logo");
+        const name = document.getElementById("end-name");
+        const size = fitSize(e.name || "", 104, 900, "Bricolage Grotesque");
+        name.innerHTML = [...(e.name || "")].map((c) => `<span class="end-g" style="font-size:${size}px">${c === " " ? " " : c}</span>`).join("");
+        if (!e.name) name.style.display = "none";
+        const line = document.getElementById("end-line");
+        line.textContent = e.line || "";
+        if (!e.line) line.style.display = "none";
+
+        tl.to("#progress", { opacity: 0, duration: 0.2, ease: "power2.in" }, at - 0.25);
+        tl.set("#end", { visibility: "visible" }, at);
+        tl.fromTo("#end", { opacity: 0 }, { opacity: 1, duration: 0.12, ease: "none" }, at);
+        tl.fromTo("#end-glow", { scale: 0.3, opacity: 0 }, { scale: 1.1, opacity: 1, duration: 0.6, ease: "expo.out" }, at);
+        tl.to("#end-glow", { scale: 0.95, opacity: 0.7, duration: 1.2, ease: "sine.inOut", yoyo: true, repeat: 1 }, at + 0.6);
+        tl.fromTo("#end-mark", { scale: 0, rotation: -14 }, { scale: 1, rotation: 0, duration: 0.55, ease: "back.out(2.2)" }, at + 0.08);
+        tl.fromTo("#end-ring", { scale: 0.9, opacity: 1 }, { scale: 1.35, opacity: 0, duration: 0.6, ease: "power2.out" }, at + 0.42);
+        shake(tl, "#end-mark", at + 0.4, 12);
+        name.querySelectorAll(".end-g").forEach((g, i) => {
+          tl.fromTo(g, { yPercent: 110, opacity: 0 }, { yPercent: 0, opacity: 1, duration: 0.36, ease: "back.out(2)" }, at + 0.5 + i * 0.025);
+        });
+        if (e.line) tl.fromTo(line, { scale: 0, rotation: -8 }, { scale: 1, rotation: -2, duration: 0.4, ease: "back.out(3)" }, at + 0.9);
+        tl.to("#end-mark", { y: -14, duration: 0.9, ease: "sine.inOut", yoyo: true, repeat: 1 }, at + 0.7);
+      }
+
       function build() {
         const tl = gsap.timeline({ paused: true });
         tl.fromTo("#progress-fill", { scaleX: 0 }, { scaleX: 1, duration: D, ease: "none" }, 0);
@@ -456,12 +513,13 @@
           tl.to("#flash", { opacity: 0, duration: 0.28, ease: "power2.out" }, DATA.cut + 0.02);
         }
         tl.fromTo("#fadeout", { opacity: 0 }, { opacity: 1, duration: 0.45, ease: "power2.in" }, Math.max(0, DATA.duration - 0.45));
+        buildEnd(tl);
         tl.seek(0);
         window.__timelines["reel"] = tl;
       }
 
       window.__timelines = window.__timelines || {};
-      Promise.all([document.fonts.load('800 80px "Bricolage Grotesque"'), document.fonts.load('800 30px "Inter"')]).then(build, build);
+      Promise.all([document.fonts.load('800 80px "Bricolage Grotesque"'), document.fonts.load('800 30px "Inter"'), prepareEnd()]).then(build, build);
     </script>
   </body>
 </html>

@@ -3,6 +3,8 @@
 # dependencies = ["opencv-python-headless"]
 # ///
 import argparse
+import contextlib
+import functools
 import html
 import json
 import os
@@ -12,7 +14,6 @@ import statistics
 import subprocess
 import sys
 import time
-import unicodedata
 import urllib.request
 from pathlib import Path
 
@@ -24,6 +25,9 @@ WATERMARK = SKILL_DIR / "assets" / "brand" / "watermark.png"
 HYPERFRAMES = "hyperframes@0.8.96"
 JOBS = int(os.environ.get("MUSUBI_CLIPS_JOBS", 3))
 MUSIC = {"file": None, "volume": 0.12}
+END = {"choice": None, "name": "", "line": "", "screen": None}
+END_SECONDS = 2.6
+IMAGE_TYPES = {"image/svg+xml": ".svg", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
 WORK = Path(os.environ.get("MUSUBI_CLIPS_DIR", Path.home() / "MusubiClips"))
 FACE_MODEL = Path.home() / ".cache" / "musubi-clips" / "face_detection_yunet_2023mar.onnx"
 FACE_MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
@@ -35,6 +39,7 @@ MIN_FACE = 0.05
 LEAD, TAIL = 0.25, 0.7
 SENTENCE_REACH = 1.2
 FADE_IN, FADE_OUT, JOIN_FADE = 0.15, 0.5, 0.08
+SECTION_PAD = 3.0
 
 
 def run(cmd, cwd=None):
@@ -86,6 +91,59 @@ def stream_url(url):
             pass
     return "unavailable:"
 
+
+def cached_stream(workdir, url):
+    path = workdir / "stream.json"
+    if path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved["expires"] > time.time() + 1800:
+            return saved["url"]
+    stream = stream_url(url)
+    expires = re.search(r"[?&/]expire[=/](\d+)", stream)
+    if expires:
+        path.write_text(encoding="utf-8", data=json.dumps({"url": stream, "expires": int(expires[1])}))
+    return stream
+
+
+def find_stream(workdir, meta):
+    if (workdir / "source.mp4").exists() or not meta.get("url"):
+        return None
+    log("finding the video stream")
+    for attempt in range(3):
+        try:
+            return cached_stream(workdir, meta["url"])
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            time.sleep(30)
+
+
+def covering_section(folder, start, end):
+    """A finished section that holds start to end; waits while another process is still writing one."""
+    while True:
+        done, writing = None, False
+        for f in folder.glob("*.mp4"):
+            span = re.fullmatch(r"(\d+\.\d+)-(\d+\.\d+)(\.part)?", f.stem)
+            if not span or float(span[1]) > start or float(span[2]) < end:
+                continue
+            if not span[3]:
+                done = f
+            elif time.time() - f.stat().st_mtime < 60:
+                writing = True
+        if done or not writing:
+            return done
+        time.sleep(2)
+
+
+@functools.cache
+def fast_encoder():
+    """Hardware H.264 for the in between files, which are encoded again later; x264 where there is none."""
+    encoders = run(["ffmpeg", "-hide_banner", "-encoders"]).stdout
+    if "h264_videotoolbox" in encoders:
+        return ["-c:v", "h264_videotoolbox", "-b:v", "24M"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "16"]
+
+
 def video_section(workdir, meta, clip, stream):
     full = workdir / "source.mp4"
     if full.exists():
@@ -93,42 +151,49 @@ def video_section(workdir, meta, clip, stream):
     if meta.get("path"):
         return Path(meta["path"]), 0.0
     pieces = pieces_for(clip)
-    start = max(0.0, min(a for a, _ in pieces) - 1)
-    end = max(b for _, b in pieces) + 1
-    out = workdir / "sections" / f"{start:.2f}-{end:.2f}.mp4"
-    if not out.exists():
-        out.parent.mkdir(exist_ok=True)
-        audio = ["-ss", f"{start}", "-t", f"{end - start}", "-i", str(source_audio(workdir)),
-                 "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
-                 "-c:a", "aac", "-b:a", "192k", str(out)]
-        try:
-            run(["ffmpeg", "-y", "-ss", f"{start}", "-t", f"{end - start}", "-i", stream, *audio])
-        except subprocess.CalledProcessError:
-            out.unlink(missing_ok=True)
-            if not meta.get("url"):
-                raise
-            piece = out.with_suffix(".video.mp4")
-            for attempt in range(3):
-                try:
-                    piece.unlink(missing_ok=True)
-                    run([*YTDLP, "-f", VIDEO_FORMAT, "--no-playlist", "--download-sections", f"*{start}-{end}",
-                         "--force-keyframes-at-cuts", "-o", str(piece), meta["url"]])
-                    run(["ffmpeg", "-y", "-t", f"{end - start}", "-i", str(piece), *audio])
-                    break
-                except subprocess.CalledProcessError:
-                    out.unlink(missing_ok=True)
-                    if attempt == 2:
-                        raise
-                    time.sleep(20)
-            piece.unlink(missing_ok=True)
-    return out, start
+    folder = workdir / "sections"
+    folder.mkdir(exist_ok=True)
+    found = covering_section(folder, min(a for a, _ in pieces) - 0.5, max(b for _, b in pieces) + 0.5)
+    if found:
+        return found, float(found.stem.split("-")[0])
+    start = max(0.0, min(a for a, _ in pieces) - SECTION_PAD)
+    end = max(b for _, b in pieces) + SECTION_PAD
+    final = folder / f"{start:.2f}-{end:.2f}.mp4"
+    out = final.with_suffix(".part.mp4")
+    audio = ["-ss", f"{start}", "-t", f"{end - start}", "-i", str(source_audio(workdir)),
+             "-map", "0:v:0", "-map", "1:a:0", *fast_encoder(),
+             "-c:a", "aac", "-b:a", "192k", str(out)]
+    try:
+        run(["ffmpeg", "-y", "-ss", f"{start}", "-t", f"{end - start}", "-i", stream, *audio])
+    except subprocess.CalledProcessError:
+        out.unlink(missing_ok=True)
+        (workdir / "stream.json").unlink(missing_ok=True)
+        if not meta.get("url"):
+            raise
+        piece = final.with_suffix(".video.mp4")
+        for attempt in range(3):
+            try:
+                piece.unlink(missing_ok=True)
+                run([*YTDLP, "-f", VIDEO_FORMAT, "--no-playlist", "--download-sections", f"*{start}-{end}",
+                     "--force-keyframes-at-cuts", "-o", str(piece), meta["url"]])
+                run(["ffmpeg", "-y", "-t", f"{end - start}", "-i", str(piece), *audio])
+                break
+            except subprocess.CalledProcessError:
+                out.unlink(missing_ok=True)
+                if attempt == 2:
+                    raise
+                time.sleep(20)
+        piece.unlink(missing_ok=True)
+    out.replace(final)
+    return final, start
 
 
 def shifted(clip, words, offset):
     if not offset:
         return clip, words
     moved = {**clip, "start": clip["start"] - offset, "end": clip["end"] - offset,
-             "cold_open": [t - offset for t in clip["cold_open"]] if clip["cold_open"] else None}
+             "cold_open": [t - offset for t in clip["cold_open"]] if clip["cold_open"] else None,
+             "skip": [[a - offset, b - offset] for a, b in clip.get("skip") or []]}
     for key in ("stat", "deal"):
         if isinstance(clip.get(key), dict):
             moved[key] = {**clip[key], **{k: clip[key][k] - offset for k in ("at", "sub_at") if isinstance(clip[key].get(k), (int, float))}}
@@ -205,40 +270,35 @@ def transcribe(workdir, video, meta):
     return transcript
 
 
-def all_words(transcript, workdir=None):
-    words = [w for s in transcript["segments"] for w in s["words"] if w["word"]]
-    roman = workdir / "roman.json" if workdir else None
-    if not roman or not roman.exists():
-        return words
-    table = {nfc(k): v for k, v in json.loads(roman.read_text(encoding="utf-8")).items()}
-    out = []
-    for w in words:
-        text, core = split_word(w["word"])
-        out.append({**w, "word": table.get(core, core) + text[len(core):]})
-    return out
+def all_words(transcript):
+    return [w for s in transcript["segments"] for w in s["words"] if w["word"]]
 
 
-def nfc(text):
-    return unicodedata.normalize("NFC", text)
+def english_words(workdir, language):
+    path = workdir / "english.json"
+    if language == "en" and not path.exists():
+        return None
+    if not path.exists():
+        sys.exit("english.json is missing: run `english` and write an English line for every line it lists.")
+    words = []
+    for line in json.loads(path.read_text(encoding="utf-8")):
+        tokens = line["text"].split()
+        weights = [len(t) + 2 for t in tokens]
+        t, step = line["start"], (line["end"] - line["start"]) / max(sum(weights), 1)
+        for token, weight in zip(tokens, weights):
+            words.append({"word": token, "start": round(t, 3), "end": round(t + weight * step, 3)})
+            t += weight * step
+    return sorted(words, key=lambda w: w["start"])
 
 
-def split_word(word):
-    text = nfc(word).replace("\u0964", ".").replace("\u0965", ".")
-    return text, text.rstrip(".?!,")
-
-
-def unromanised(workdir):
+def untranslated(workdir):
     transcript = json.loads((workdir / "transcript.json").read_text(encoding="utf-8"))
-    raw = [w for s in transcript["segments"] for w in s["words"] if w["word"]]
-    roman = workdir / "roman.json"
-    table = {nfc(k) for k in json.loads(roman.read_text(encoding="utf-8"))} if roman.exists() else set()
-    spans = [(m["start"], m["end"]) for m in load_moments(workdir)]
-    missing = []
-    for w in raw:
-        core = split_word(w["word"])[1]
-        if any(a - 0.5 <= w["start"] <= b + 0.5 for a, b in spans) and not core.isascii() and core not in table and core not in missing:
-            missing.append(core)
-    return missing
+    path = workdir / "english.json"
+    done = [(l["start"], l["end"]) for l in json.loads(path.read_text(encoding="utf-8"))] if path.exists() else []
+    spans = [(m["start"] - 1.5, m["end"] + 1.5) for m in load_moments(workdir)]
+    return [f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}" for s in transcript["segments"]
+            if any(a < s["end"] and s["start"] < b for a, b in spans)
+            and not any(a < s["end"] - 0.3 and s["start"] + 0.3 < b for a, b in done)]
 
 
 def clip_time(clip, t):
@@ -260,9 +320,9 @@ def card(clip, key):
 
 def snap(t, words, edge):
     if edge == "end":
-        whole = [w for w in words if w["word"][-1:] in ".?!"]
+        whole = [w for w in words if w["word"][-1:] in ".?!\u0964"]
     else:
-        whole = [w for i, w in enumerate(words) if i == 0 or words[i - 1]["word"][-1:] in ".?!"]
+        whole = [w for i, w in enumerate(words) if i == 0 or words[i - 1]["word"][-1:] in ".?!\u0964"]
     near = [w for w in whole if abs(w[edge] - t) <= SENTENCE_REACH]
     return min(near or words, key=lambda w: abs(w[edge] - t))[edge]
 
@@ -294,7 +354,9 @@ def tidy_clips(raw, words, keep):
             if start + 1 < cs and ce <= end and 1.5 <= ce - cs <= 8:
                 cold = list(breathe(cs, ce, words, 0.1, 0.3))
         start, end = breathe(start, end, words, LEAD, TAIL)
-        clips.append({**clip, "start": start, "end": end, "cold_open": cold, "score": rank_score(clip)})
+        skip = sorted([a, b] for a, b in clip.get("skip") or [] if start + 1 < a < b < end - 1)
+        skip = [s for i, s in enumerate(skip) if i == 0 or s[0] > skip[i - 1][1]]
+        clips.append({**clip, "start": start, "end": end, "cold_open": cold, "skip": skip, "score": rank_score(clip)})
     clips.sort(key=lambda c: -c["score"])
     return clips[:keep]
 
@@ -321,6 +383,10 @@ def moment_problems(raw):
         for field in ("speaker_name", "speaker_role"):
             if clip.get(field) is not None and not isinstance(clip[field], str):
                 problems.append(f"moment {i}: {field} must be text")
+        skip = clip.get("skip")
+        if skip is not None and (not isinstance(skip, list) or not all(
+                isinstance(s, list) and len(s) == 2 and all(isinstance(t, (int, float)) for t in s) and s[0] < s[1] for s in skip)):
+            problems.append(f"moment {i}: skip must be a list of [from, to] seconds pairs")
         parts = clip.get("hook_parts")
         if parts is not None and (not isinstance(parts, dict) or not all(isinstance(parts.get(k, ""), str) for k in ("kicker", "big", "punch"))):
             problems.append(f"moment {i}: hook_parts must hold kicker, big and punch as text")
@@ -452,9 +518,12 @@ def crop_expression(points):
 
 
 def pieces_for(clip):
-    if clip["cold_open"]:
-        return [tuple(clip["cold_open"]), (clip["start"], clip["end"])]
-    return [(clip["start"], clip["end"])]
+    main, at = [], clip["start"]
+    for a, b in sorted(clip.get("skip") or []):
+        main.append((at, a))
+        at = b
+    main.append((at, clip["end"]))
+    return ([tuple(clip["cold_open"])] if clip["cold_open"] else []) + main
 
 
 def ass_time(t):
@@ -465,7 +534,7 @@ def ass_time(t):
 def caption_chunks(words, size=6, gap=0.6):
     chunks, current = [], []
     for word in words:
-        if current and (len(current) == size or word["start"] - current[-1]["end"] > gap
+        if current and (len(current) == size or word["start"] - current[-1]["end"] > gap or word.get("cut")
                         or current[-1]["word"][-1:] in ".?!"):
             chunks.append(current)
             current = []
@@ -482,8 +551,11 @@ def ass_escape(text):
 def clip_timeline(clip, words):
     timeline, offset = [], 0.0
     for a, b in pieces_for(clip):
-        timeline += [{"word": w["word"], "start": w["start"] - a + offset, "end": w["end"] - a + offset}
-                     for w in words if w["start"] >= a - 0.05 and w["end"] <= b + 0.05]
+        piece = [{"word": w["word"], "start": w["start"] - a + offset, "end": min(w["end"], b) - a + offset}
+                 for w in words if a - 0.05 <= w["start"] < b]
+        if piece and timeline:
+            piece[0]["cut"] = True
+        timeline += piece
         offset += b - a
     return timeline
 
@@ -558,11 +630,10 @@ def cut_graph(video, clip, detector, subtitles=None):
                              f"movie={WATERMARK.name}[wm]", "[sv][wm]overlay=W-w-48:H-h-64[vo]"])
 
 
-def cut(video, clip, graph, out, cwd):
+def cut(video, clip, graph, out, cwd, encoder=("-c:v", "libx264", "-preset", "veryfast", "-crf", "18")):
     run(["ffmpeg", "-y", "-ss", f"{clip['start']}", "-t", f"{clip['end'] - clip['start']}", "-i", str(video),
          "-filter_complex", graph, "-map", "[vo]", "-map", "[ca]",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "160k",
-         "-movflags", "+faststart", str(out)], cwd=cwd)
+         *encoder, "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)], cwd=cwd)
 
 
 def reel_data(clip, words, duration, face=None):
@@ -587,6 +658,54 @@ def reel_data(clip, words, duration, face=None):
     }
 
 
+def channel_card(url):
+    info = json.loads(run([*YTDLP, "--flat-playlist", "--playlist-items", "0", "-J", url]).stdout)
+    avatar = next((t["url"] for t in info.get("thumbnails", []) if t.get("id") == "avatar_uncropped"), None)
+    if not avatar:
+        sys.exit(f"no channel avatar found for {url}; pass a logo file or image url to --end-screen")
+    return avatar, info.get("channel") or info.get("uploader") or "", info.get("uploader_id") or ""
+
+
+def download_image(url, folder):
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        kind = response.headers.get_content_type()
+        suffix = IMAGE_TYPES.get(kind) or Path(url.split("?")[0]).suffix.lower()
+        if suffix not in IMAGE_TYPES.values():
+            sys.exit(f"--end-screen {url} is not an image ({kind})")
+        target = folder / f"end-logo{suffix}"
+        target.write_bytes(response.read())
+    return target
+
+
+def end_screen(workdir):
+    choice = END["choice"]
+    if not choice:
+        return None
+    name, line, kind = END["name"], END["line"], "logo"
+    if choice == "channel" or re.match(r"https?://(www\.|m\.)?youtube\.com/(@|channel/|c/|user/)", choice):
+        if choice == "channel":
+            info_file = workdir / "source-audio.info.json"
+            choice = json.loads(info_file.read_text(encoding="utf-8")).get("channel_url") if info_file.exists() else None
+            if not choice:
+                sys.exit("--end-screen with no logo needs a YouTube video; pass a logo file or image url")
+        choice, channel, handle = channel_card(choice)
+        name, line, kind = name or channel, line or handle, "avatar"
+    for old in workdir.glob("end-logo.*"):
+        old.unlink()
+    if Path(choice).expanduser().is_file():
+        source = Path(choice).expanduser()
+        if source.suffix.lower() not in IMAGE_TYPES.values():
+            sys.exit(f"--end-screen {choice} is not an image (svg, png, jpg, webp or gif)")
+        logo = workdir / f"end-logo{source.suffix.lower()}"
+        shutil.copy(source, logo)
+    elif choice.startswith(("http://", "https://")):
+        logo = download_image(choice, workdir)
+    else:
+        sys.exit(f"--end-screen {choice} is neither a file nor a url")
+    return {"logo": logo, "kind": kind, "name": name.strip(), "line": line.strip()}
+
+
 def npx():
     return shutil.which("npx")
 
@@ -607,16 +726,23 @@ def render_styled(workdir, video, clip, words, name, detector, clip_dir, paralle
     for font in FONTS.glob("*.ttf"):
         shutil.copy(font, project / "fonts" / font.name)
     shutil.copy(WATERMARK, project / WATERMARK.name)
+    end = END["screen"]
+    if end:
+        shutil.copy(end["logo"], project / end["logo"].name)
     music = ""
     if MUSIC["file"]:
         shutil.copy(MUSIC["file"], project / ("music" + Path(MUSIC["file"]).suffix))
-        music = (f'<audio id="music" src="music{Path(MUSIC["file"]).suffix}" data-start="0" data-duration="__DURATION__" '
+        music = (f'<audio id="music" src="music{Path(MUSIC["file"]).suffix}" data-start="0" data-duration="__TOTAL__" '
                  f'data-track-index="11" data-volume="{MUSIC["volume"]}"></audio>')
-    cut(video, clip, cut_graph(video, clip, detector), project / "base.mp4", project)
+    cut(video, clip, cut_graph(video, clip, detector), project / "base.mp4", project, fast_encoder())
     duration = round(duration_of(project / "base.mp4") - 0.05, 3)
-    data = json.dumps(reel_data(clip, words, duration, face_span(project / "base.mp4", detector)), ensure_ascii=False)
+    reel = reel_data(clip, words, duration, face_span(project / "base.mp4", detector))
+    if end:
+        reel["end"] = {"src": end["logo"].name, "kind": end["kind"], "name": end["name"], "line": end["line"], "seconds": END_SECONDS}
+    data = json.dumps(reel, ensure_ascii=False)
+    total = round(duration + (END_SECONDS if end else 0), 3)
     html = REEL_TEMPLATES[STYLE["design"]].read_text(encoding="utf-8")
-    html = html.replace("<!--__MUSIC__-->", music).replace("__DURATION__", f"{duration}").replace("<!--__DATA__-->", f"<script>window.__REEL_DATA__ = {data};</script>")
+    html = html.replace("<!--__MUSIC__-->", music).replace("__TOTAL__", f"{total}").replace("__DURATION__", f"{duration}").replace("<!--__DATA__-->", f"<script>window.__REEL_DATA__ = {data};</script>")
     html = html.replace("<!--__WATERMARK__-->", '<img id="wm" src="watermark.png" alt="" />' if STYLE["watermark"] else "")
     (project / "index.html").write_text(encoding="utf-8", data=html)
     command = [npx(), "--yes", HYPERFRAMES, "render", str(project), "-o", str(clip_dir / f"{name}.mp4"),
@@ -646,10 +772,10 @@ def clip_name(index, clip):
     return f"{index:02d}-{re.sub(r'[^a-z0-9]+', '-', clip['title'].lower()).strip('-')[:40] or 'clip'}"
 
 
-def render(workdir, meta, clip, words, index, styled, stream, parallel):
+def render(workdir, clip, words, index, styled, section, parallel):
     clip_dir = workdir / "clips"
     name = clip_name(index, clip)
-    video, offset = video_section(workdir, meta, clip, stream)
+    video, offset = section
     clip, words = shifted(clip, words, offset)
     detector = face_detector()
     if styled:
@@ -698,18 +824,64 @@ def prepare(source):
     meta = {**meta, "duration": round(duration_of(video)), "transcript_source": transcript["source"],
             "language": transcript["language"]}
     (workdir / "meta.json").write_text(encoding="utf-8", data=json.dumps(meta, ensure_ascii=False, indent=2))
+    if meta["url"] and not (workdir / "source.mp4").exists():
+        cached_stream(workdir, meta["url"])
     print(json.dumps({"workdir": str(workdir), **meta, "segments": len(lines),
                       "transcript": str(workdir / "transcript.txt"), "moments_file": str(workdir / "moments.json")},
                      ensure_ascii=False, indent=2))
 
 
-def render_all(workdir, count, basic=False):
+def planned(workdir, count):
     meta = json.loads((workdir / "meta.json").read_text(encoding="utf-8"))
     transcript = json.loads((workdir / "transcript.json").read_text(encoding="utf-8"))
-    words = all_words(transcript, workdir)
+    words = all_words(transcript)
     clips = tidy_clips(load_moments(workdir), words, count)
     if not clips:
         sys.exit(f"No usable moments: each needs {MIN_CLIP:.0f} to {MAX_CLIP:.0f} seconds and must not overlap another.")
+    return meta, words, clips
+
+
+def download_sections(workdir, meta, clips):
+    from concurrent.futures import ThreadPoolExecutor
+
+    stream = find_stream(workdir, meta)
+    with ThreadPoolExecutor(len(clips)) as pool:
+        return list(pool.map(lambda clip: video_section(workdir, meta, clip, stream), clips))
+
+
+def fetch_sections(workdir, count):
+    meta, _, clips = planned(workdir, count)
+    download_sections(workdir, meta, clips)
+    log(f"fetched the video for {len(clips)} clips")
+
+
+@contextlib.contextmanager
+def render_lock():
+    """One render per machine at a time, so several videos in a batch do not all slow each other down."""
+    WORK.mkdir(parents=True, exist_ok=True)
+    with open(WORK / ".render.lock", "a+") as handle:
+        handle.seek(0)
+        waiting = False
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if not waiting:
+                    log("another render is running on this machine, waiting for it to finish")
+                    waiting = True
+                time.sleep(3)
+        yield
+
+
+def render_all(workdir, count, basic=False):
+    meta, words, clips = planned(workdir, count)
+    words = english_words(workdir, meta["language"]) or words
     old = workdir / "clips"
     if old.exists():
         shutil.rmtree(old)
@@ -719,32 +891,47 @@ def render_all(workdir, count, basic=False):
         log("Node.js 22 or newer not found, so rendering basic captions. Install Node for the animated style.")
     if (workdir / "reel").exists():
         shutil.rmtree(workdir / "reel")
-    stream = None
-    if not (workdir / "source.mp4").exists() and meta.get("url"):
-        log("finding the video stream")
-        for attempt in range(3):
-            try:
-                stream = stream_url(meta["url"])
-                break
-            except subprocess.CalledProcessError:
-                if attempt == 2:
-                    raise
-                time.sleep(30)
+    END["screen"] = end_screen(workdir) if styled else None
+    if END["choice"] and not styled:
+        log("basic captions have no end screen, so it is left out")
+    sections = download_sections(workdir, meta, clips)
     from concurrent.futures import ThreadPoolExecutor
 
     parallel = len(clips) > 1
-    log(f"rendering {len(clips)} clips {'animated' if styled else 'with basic captions'}, {min(JOBS, len(clips))} at a time")
-    with ThreadPoolExecutor(min(JOBS, len(clips))) as pool:
-        files = list(pool.map(lambda pair: render(workdir, meta, pair[1], words, pair[0], styled, stream, parallel),
-                              enumerate(clips, 1)))
+    with render_lock():
+        log(f"rendering {len(clips)} clips {'animated' if styled else 'with basic captions'}, {min(JOBS, len(clips))} at a time")
+        with ThreadPoolExecutor(min(JOBS, len(clips))) as pool:
+            files = list(pool.map(lambda pair: render(workdir, pair[1], words, pair[0], styled, sections[pair[0] - 1], parallel),
+                                  enumerate(clips, 1)))
     for clip, file in zip(clips, files):
         clip["file"] = file
+        clip["end_screen"] = bool(END["screen"])
     (workdir / "clips" / "clips.json").write_text(encoding="utf-8", data=json.dumps(clips, ensure_ascii=False, indent=2))
     write_review(workdir, meta, clips)
     print(json.dumps({"review_page": str(workdir / "clips" / "index.html"),
                       "clips": [{"file": str(workdir / "clips" / c["file"]), "title": c["title"], "score": c["score"],
-                                 "seconds": round(c["end"] - c["start"] + (c["cold_open"][1] - c["cold_open"][0] if c["cold_open"] else 0))}
+                                 "seconds": round(sum(b - a for a, b in pieces_for(c)) + (END_SECONDS if c["end_screen"] else 0))}
                                 for c in clips]}, ensure_ascii=False, indent=2))
+
+
+def check(workdir):
+    clips = json.loads((workdir / "clips" / "clips.json").read_text(encoding="utf-8"))
+    folder = workdir / "check"
+    folder.mkdir(exist_ok=True)
+    sheets = []
+    for clip in clips:
+        video = workdir / "clips" / clip["file"]
+        length = duration_of(video)
+        cards = [c["at"] + 0.8 for c in (card(clip, key) for key in ("stat", "deal")) if c]
+        ending = [length - 0.3] if clip.get("end_screen") else []
+        times = [min(t, length - 0.1) for t in [1.3, *cards, length / 2, *ending]]
+        inputs = [arg for t in times for arg in ("-ss", f"{t:.2f}", "-i", str(video))]
+        graph = "".join(f"[{i}:v]scale=360:-2[f{i}];" for i in range(len(times)))
+        graph += "".join(f"[f{i}]" for i in range(len(times))) + f"hstack=inputs={len(times)}"
+        sheet = folder / f"{Path(clip['file']).stem}.jpg"
+        run(["ffmpeg", "-v", "error", "-y", *inputs, "-filter_complex", graph, "-frames:v", "1", str(sheet)])
+        sheets.append({"sheet": str(sheet), "seconds": [round(t, 1) for t in times]})
+    print(json.dumps(sheets, ensure_ascii=False, indent=2))
 
 
 def install_hint(tool):
@@ -771,7 +958,7 @@ def doctor():
 
 
 def workdir_for(value):
-    path = Path(value).expanduser()
+    path = Path(value).expanduser().resolve()
     return path if path.is_dir() else WORK / value
 
 
@@ -791,7 +978,17 @@ def main():
                       help="the musubiclip.com watermark; on by default for v1, off for v2")
     step.add_argument("--keep-height", type=float, default=1.0,
                       help="share of the source height to keep from the top, e.g. 0.86 to crop off burned in subtitles")
-    step = commands.add_parser("words", help="list transcript words inside moments.json that roman.json does not spell yet")
+    step.add_argument("--end-screen", nargs="?", const="channel", metavar="LOGO",
+                      help="add an animated end screen (v2): alone uses this video's YouTube channel avatar; "
+                           "a YouTube channel url uses that channel's; else a logo file or image url")
+    step.add_argument("--end-name", default="", help="the big name on the end screen (default the channel name)")
+    step.add_argument("--end-line", default="", help="the line under it, such as a handle or website (default the @handle)")
+    step = commands.add_parser("fetch", help="download the video for the moments ahead of render, in the background")
+    step.add_argument("workdir", help="the workdir prepare printed, or the video id")
+    step.add_argument("-n", "--count", type=int, default=3, help="clips you will render")
+    step = commands.add_parser("check", help="one contact sheet per rendered clip: the hook, each card and the middle")
+    step.add_argument("workdir", help="the workdir prepare printed, or the video id")
+    step = commands.add_parser("english", help="list transcript lines inside moments.json that english.json does not translate yet")
     step.add_argument("workdir", help="the workdir prepare printed, or the video id")
     commands.add_parser("doctor", help="check the tools and key are in place")
     args = parser.parse_args()
@@ -807,9 +1004,16 @@ def main():
             sys.exit("--keep-height must be between 0.5 and 1")
         watermark = args.watermark == "on" if args.watermark else args.design == "v1"
         STYLE.update(design=args.design, keep_height=args.keep_height, watermark=watermark)
+        if args.end_screen and args.design != "v2":
+            sys.exit("--end-screen needs --design v2")
+        END.update(choice=args.end_screen, name=args.end_name, line=args.end_line)
         render_all(workdir_for(args.workdir), args.count, args.basic)
-    elif args.command == "words":
-        print(json.dumps(unromanised(workdir_for(args.workdir)), ensure_ascii=False))
+    elif args.command == "fetch":
+        fetch_sections(workdir_for(args.workdir), args.count)
+    elif args.command == "check":
+        check(workdir_for(args.workdir))
+    elif args.command == "english":
+        print("\n".join(untranslated(workdir_for(args.workdir))) or "[]")
     else:
         doctor()
 

@@ -106,14 +106,6 @@ def test_cards_move_with_the_clip_and_land_in_clip_time():
     assert card(moved, "deal") is None
 
 
-def test_roman_table_spells_words_and_keeps_punctuation(tmp_path):
-    import json
-    from clipper import all_words
-    (tmp_path / "roman.json").write_text(json.dumps({"पानी": "paani", "थोड़ा": "thoda"}, ensure_ascii=False))
-    transcript = {"segments": [{"words": [word("पानी।", 0, 1), word("थोड़ा", 1, 2), word("Cleevo", 2, 3)]}]}
-    assert [w["word"] for w in all_words(transcript, tmp_path)] == ["paani.", "thoda", "Cleevo"]
-
-
 def test_moment_problems_checks_cards():
     from clipper import moment_problems
     good = {"start": 1, "end": 30, "title": "t", "hook_text": "h", "reason": "r", "hook": 3, "standalone": 3, "payoff": 3, "emotion": 3}
@@ -139,7 +131,46 @@ def test_snap_prefers_whole_sentences_nearby():
     assert snap(6.2, words, "end") == 6.3
 
 
+def test_skip_drops_a_span_and_keeps_cards_in_clip_time():
+    from clipper import card, clip_timeline, pieces_for, shifted
+    words = [word("a", 10.0, 10.5), word("b", 12.0, 12.4), word("c", 20.0, 20.5)]
+    clip = {"start": 10.0, "end": 21.0, "cold_open": None, "skip": [[13.0, 19.0]], "stat": {"at": 20.0, "value": "9"}}
+    assert pieces_for(clip) == [(10.0, 13.0), (19.0, 21.0)]
+    assert [(w["word"], w["start"]) for w in clip_timeline(clip, words)] == [("a", 0.0), ("b", 2.0), ("c", 4.0)]
+    assert card(clip, "stat")["at"] == 4.0
+    moved, _ = shifted(clip, words, 5.0)
+    assert moved["skip"] == [[8.0, 14.0]]
+
+
 def test_main_face_ignores_a_hand_low_in_the_frame():
     speaker, hand = (200, 80, 120, 150), (40, 400, 60, 60)
     assert main_face([hand, speaker]) == speaker
     assert main_face([]) is None
+
+
+def test_a_section_is_reused_when_it_covers_the_clip(tmp_path):
+    import os
+    from clipper import covering_section
+    (tmp_path / "100.00-160.00.mp4").touch()
+    (tmp_path / "100.00-160.00.video.mp4").touch()
+    stale = tmp_path / "300.00-360.00.part.mp4"
+    stale.touch()
+    os.utime(stale, (0, 0))
+    assert covering_section(tmp_path, 102, 158).name == "100.00-160.00.mp4"
+    assert covering_section(tmp_path, 98, 158) is None
+    assert covering_section(tmp_path, 302, 358) is None
+
+
+def test_end_screen_takes_a_logo_file_and_needs_a_video_for_the_channel(tmp_path):
+    import pytest
+    from clipper import END, end_screen
+
+    logo = tmp_path / "brand.png"
+    logo.write_bytes(b"png")
+    END.update(choice=str(logo), name=" Cleevo ", line="cleevo.in")
+    screen = end_screen(tmp_path)
+    assert screen == {"logo": tmp_path / "end-logo.png", "kind": "logo", "name": "Cleevo", "line": "cleevo.in"}
+    END.update(choice="channel")
+    with pytest.raises(SystemExit):
+        end_screen(tmp_path)
+    END.update(choice=None)
